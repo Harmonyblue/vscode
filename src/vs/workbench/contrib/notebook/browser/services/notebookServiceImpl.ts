@@ -42,6 +42,12 @@ import { IUriIdentityService } from 'vs/platform/uriIdentity/common/uriIdentity'
 import { INotebookDocument, INotebookDocumentService } from 'vs/workbench/services/notebook/common/notebookDocumentService';
 import { MergeEditorInput } from 'vs/workbench/contrib/mergeEditor/browser/mergeEditorInput';
 import type { EditorInputWithOptions, IResourceMergeEditorInput } from 'vs/workbench/common/editor';
+import { MultiDiffEditorInput } from 'vs/workbench/contrib/multiDiffEditor/browser/multiDiffEditorInput';
+import { NotebookDiffViewModel } from 'vs/workbench/contrib/notebook/browser/diff/notebookDiffViewModel';
+import { INotebookEditorWorkerService } from 'vs/workbench/contrib/notebook/common/services/notebookWorkerService';
+import { NotebookDiffEditorEventDispatcher } from 'vs/workbench/contrib/notebook/browser/diff/eventDispatcher';
+import { CancellationTokenSource } from 'vs/base/common/cancellation';
+import { SideBySideDiffElementViewModel } from 'vs/workbench/contrib/notebook/browser/diff/diffElementViewModel';
 
 export class NotebookProviderInfoStore extends Disposable {
 
@@ -64,6 +70,7 @@ export class NotebookProviderInfoStore extends Disposable {
 		@IFileService private readonly _fileService: IFileService,
 		@INotebookEditorModelResolverService private readonly _notebookEditorModelResolverService: INotebookEditorModelResolverService,
 		@IUriIdentityService private readonly uriIdentService: IUriIdentityService,
+		@INotebookEditorWorkerService private readonly notebookEditorWorkerService: INotebookEditorWorkerService,
 	) {
 		super();
 
@@ -212,8 +219,39 @@ export class NotebookProviderInfoStore extends Disposable {
 
 				return { editor: NotebookEditorInput.getOrCreate(this._instantiationService, ref.object.resource, undefined, notebookProviderInfo.id), options };
 			};
-			const notebookDiffEditorInputFactory: DiffEditorInputFactoryFunction = ({ modified, original, label, description }) => {
-				return { editor: NotebookDiffEditorInput.create(this._instantiationService, modified.resource!, label, description, original.resource!, notebookProviderInfo.id) };
+			const notebookDiffEditorInputFactory: DiffEditorInputFactoryFunction = async ({ modified, original, label, description }) => {
+				// return { editor: NotebookDiffEditorInput.create(this._instantiationService, modified.resource!, label, description, original.resource!, notebookProviderInfo.id) };
+
+				const nbInput = NotebookDiffEditorInput.create(this._instantiationService, modified.resource!, label, description, original.resource!, notebookProviderInfo.id);
+				const model = await nbInput.resolve();
+				const eventDispatcher = new NotebookDiffEditorEventDispatcher();
+				const vm = new NotebookDiffViewModel(model, this.notebookEditorWorkerService, this._instantiationService, this._configurationService, eventDispatcher, undefined, true);
+				const token = new CancellationTokenSource();
+				await vm.computeDiff(token.token);
+
+				const multifileInput = MultiDiffEditorInput.fromResourceMultiDiffEditorInput({
+					description,
+					isTransient: false,
+					label,
+					options: undefined,
+					multiDiffSource: URI.parse(`multi-cell-notebook-diff-editor:${new Date().getMilliseconds().toString() + Math.random().toString()}`),
+					// resources: vm.items.filter(v => v.type === 'modified' || v.type === 'unchanged').map(v => {
+					resources: vm.items.filter(v => v.type === 'modified').map(v => {
+						const item = v as SideBySideDiffElementViewModel;
+						const modified: IResourceEditorInput = { resource: item.modified.uri, };
+						const original: IResourceEditorInput = { resource: item.original.uri, };
+						return ({ modified, original, label, description });
+					})
+				}, this._instantiationService);
+				multifileInput.register(nbInput);
+				multifileInput.register(model);
+				multifileInput.register(vm);
+				multifileInput.register(eventDispatcher);
+				multifileInput.register(token);
+				return {
+					editor: multifileInput
+				};
+				// return { editor: NotebookDiffEditorInput.create(this._instantiationService, modified.resource!, label, description, original.resource!, notebookProviderInfo.id) };
 			};
 			const mergeEditorInputFactory: MergeEditorInputFactoryFunction = (mergeEditor: IResourceMergeEditorInput): EditorInputWithOptions => {
 				return {
